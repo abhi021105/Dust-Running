@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Dust Run</title>
+<style>
+  :root{
+    --sky-top: #2b1240;
+    --sky-mid: #ff6b4a;
+    --sky-low: #ffb454;
+    --dune-far: #7a3f52;
+    --dune-near: #4a2338;
+    --road: #241118;
+    --road-line: #ffb454;
+    --ink: #fff3e6;
+    --ink-dim: #d9a97f;
+    --accent: #ffb454;
+    --danger: #ff4d4d;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{
+    margin:0; padding:0; height:100%; background:#120818;
+    font-family: 'Trebuchet MS', 'Segoe UI', sans-serif;
+    color:var(--ink);
+    overflow:hidden;
+    user-select:none;
+  }
+  #wrap{
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    width:100%; height:100%; padding:14px;
+  }
+  #title{
+    font-weight:800; letter-spacing:0.3em; font-size:13px;
+    color:var(--ink-dim); text-transform:uppercase; margin-bottom:8px;
+  }
+  #title span{ color:var(--accent); }
+
+  #gameHolder{
+    position:relative;
+    width:min(720px, 94vw);
+    aspect-ratio: 16/9;
+    border-radius:6px;
+    overflow:hidden;
+    box-shadow:0 8px 30px rgba(0,0,0,0.5);
+    border:1px solid #3a1f2c;
+  }
+  canvas{ display:block; width:100%; height:100%; }
+
+  #hud{
+    position:absolute; top:10px; left:14px; right:14px;
+    display:flex; justify-content:space-between; align-items:flex-start;
+    font-size:14px; letter-spacing:0.05em; pointer-events:none;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+  }
+  #hud .label{ font-size:10px; color:rgba(255,243,230,0.65); letter-spacing:0.15em; }
+  #hud .val{ font-size:20px; font-weight:800; }
+  #best .val{ color:var(--accent); }
+
+  #overlay{
+    position:absolute; inset:0;
+    background:rgba(18,8,24,0.85);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    text-align:center; gap:8px; padding:20px;
+  }
+  #overlay h1{
+    font-size:26px; letter-spacing:0.08em; margin:0; color:var(--accent);
+    text-transform:uppercase; font-weight:800;
+  }
+  #overlay p{ margin:0; font-size:13px; color:var(--ink-dim); max-width:380px; line-height:1.6; }
+  #startBtn{
+    margin-top:10px;
+    background:var(--accent); color:#2b1240; border:none;
+    font-weight:800; letter-spacing:0.08em; text-transform:uppercase;
+    padding:10px 28px; border-radius:4px; font-size:13px; cursor:pointer;
+    font-family:inherit;
+  }
+  #startBtn:active{ transform:translateY(1px); }
+
+  #instructions{
+    margin-top:12px; font-size:12px; color:var(--ink-dim); text-align:center; letter-spacing:0.03em;
+  }
+  kbd{
+    background:#241326; border:1px solid #4a2c4a; border-radius:3px;
+    padding:2px 7px; color:var(--ink); font-size:11px;
+  }
+
+  @media (max-width:480px){
+    #hud .val{ font-size:16px; }
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="title">DUST <span>RUN</span></div>
+
+  <div id="gameHolder">
+    <canvas id="game"></canvas>
+    <div id="hud">
+      <div id="score"><div class="label">DISTANCE</div><div class="val" id="scoreVal">0m</div></div>
+      <div id="best"><div class="label">BEST</div><div class="val" id="bestVal">0m</div></div>
+    </div>
+    <div id="overlay">
+      <h1>Dust Run</h1>
+      <p>Ride the dusk highway. Jump the rocks and gaps, land clean, keep the throttle open. Speed climbs the further you get.</p>
+      <button id="startBtn">Start Ride</button>
+    </div>
+  </div>
+
+  <div id="instructions">
+    <kbd>SPACE</kbd> / <kbd>↑</kbd> / tap to jump &nbsp;·&nbsp; hold for a higher jump
+  </div>
+</div>
+
+<script>
+(function(){
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const holder = document.getElementById('gameHolder');
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+  const scoreVal = document.getElementById('scoreVal');
+  const bestVal = document.getElementById('bestVal');
+
+  let W, H, DPR;
+  function resize(){
+    DPR = window.devicePixelRatio || 1;
+    W = holder.clientWidth;
+    H = holder.clientHeight;
+    canvas.width = W * DPR;
+    canvas.height = H * DPR;
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+    groundY = H * 0.72;
+  }
+  let groundY = 0;
+  window.addEventListener('resize', resize);
+
+  let best = Number(localStorage.getItem('dustRunBest') || 0);
+  bestVal.textContent = best + 'm';
+
+  // game state
+  let running = false;
+  let gameSpeed = 6;
+  let distance = 0;
+  let obstacles = [];
+  let spawnTimer = 0;
+  let nextSpawn = 60;
+  let parallaxFar = 0;
+  let parallaxNear = 0;
+  let shake = 0;
+
+  const bike = {
+    x: 0, y: 0, w: 46, h: 30,
+    vy: 0,
+    onGround: true,
+    holdingJump: false,
+    wheelSpin: 0,
+    dead: false
+  };
+
+  const GRAVITY = 0.85;
+  const JUMP_V = -14.5;
+  const HOLD_BOOST = -0.55; // extra upward accel while holding, tapers
+
+  function resetGame(){
+    gameSpeed = 6.2;
+    distance = 0;
+    obstacles = [];
+    spawnTimer = 0;
+    nextSpawn = 70;
+    bike.y = 0;
+    bike.vy = 0;
+    bike.onGround = true;
+    bike.dead = false;
+    shake = 0;
+  }
+
+  function spawnObstacle(){
+    const types = ['rock','rock','gap','lowbar'];
+    const type = types[Math.floor(Math.random() * types.length)];
+    if (type === 'rock'){
+      const size = 22 + Math.random() * 18;
+      obstacles.push({ type, x: W + 20, w: size, h: size });
+    } else if (type === 'gap'){
+      const w = 60 + Math.random() * 50;
+      obstacles.push({ type, x: W + 20, w: w });
+    } else if (type === 'lowbar'){
+      obstacles.push({ type, x: W + 20, w: 14, h: 46, gap: 34 });
+    }
+  }
+
+  function jump(){
+    if (!running) return;
+    if (bike.onGround){
+      bike.vy = JUMP_V;
+      bike.onGround = false;
+    }
+    bike.holdingJump = true;
+  }
+  function releaseJump(){ bike.holdingJump = false; }
+
+  function checkCollision(bx, by, bw, bh, ox, oy, ow, oh){
+    return bx < ox + ow && bx + bw > ox && by < oy + oh && by + bh > oy;
+  }
+
+  function update(){
+    if (!running) return;
+
+    distance += gameSpeed * 0.045;
+    gameSpeed = Math.min(gameSpeed + 0.0018, 13.5);
+
+    // physics
+    bike.vy += GRAVITY;
+    if (bike.holdingJump && bike.vy < 0){ bike.vy += HOLD_BOOST; }
+    bike.y += bike.vy;
+    if (bike.y >= 0){
+      bike.y = 0;
+      bike.vy = 0;
+      bike.onGround = true;
+    }
+
+    // spawn
+    spawnTimer++;
+    if (spawnTimer >= nextSpawn){
+      spawnObstacle();
+      spawnTimer = 0;
+      nextSpawn = Math.max(38, 75 - gameSpeed * 2 + Math.random() * 30);
+    }
+
+    const bikeGroundX = W * 0.24;
+    const bikeBottom = groundY + bike.y;
+
+    for (let i = obstacles.length - 1; i >= 0; i--){
+      const o = obstacles[i];
+      o.x -= gameSpeed;
+
+      if (o.type === 'rock'){
+        const ox = o.x, oy = groundY - o.h, ow = o.w, oh = o.h;
+        if (checkCollision(bikeGroundX - bike.w/2, bikeBottom - bike.h, bike.w, bike.h, ox, oy, ow, oh)){
+          crash();
+        }
+      } else if (o.type === 'lowbar'){
+        const oy = groundY - o.gap - o.h;
+        if (checkCollision(bikeGroundX - bike.w/2, bikeBottom - bike.h, bike.w, bike.h, o.x, oy, o.w, o.h)){
+          crash();
+        }
+      } else if (o.type === 'gap'){
+        const bikeFront = bikeGroundX + bike.w/2 - 6;
+        const bikeBack = bikeGroundX - bike.w/2 + 6;
+        const overGap = bikeFront > o.x && bikeBack < o.x + o.w;
+        if (overGap && bike.onGround){
+          crash();
+        }
+      }
+
+      if (o.x + (o.w||0) < -30) obstacles.splice(i,1);
+    }
+
+    parallaxFar -= gameSpeed * 0.15;
+    parallaxNear -= gameSpeed * 0.5;
+    bike.wheelSpin += gameSpeed * 0.15;
+
+    if (shake > 0) shake *= 0.9;
+
+    scoreVal.textContent = Math.floor(distance) + 'm';
+  }
+
+  function crash(){
+    if (bike.dead) return;
+    bike.dead = true;
+    running = false;
+    shake = 10;
+    const d = Math.floor(distance);
+    if (d > best){ best = d; localStorage.setItem('dustRunBest', String(best)); }
+    bestVal.textContent = best + 'm';
+    setTimeout(showGameOver, 350);
+  }
+
+  function showGameOver(){
+    overlay.querySelector('h1').textContent = 'Wiped Out';
+    overlay.querySelector('p').textContent = 'You rode ' + Math.floor(distance) + 'm. Best: ' + best + 'm.';
+    startBtn.textContent = 'Ride Again';
+    overlay.style.display = 'flex';
+  }
+
+  function drawSky(){
+    const g = ctx.createLinearGradient(0,0,0,groundY);
+    g.addColorStop(0, '#2b1240');
+    g.addColorStop(0.55, '#ff6b4a');
+    g.addColorStop(1, '#ffb454');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,W,groundY);
+
+    // sun
+    ctx.beginPath();
+    ctx.fillStyle = 'rgba(255,244,214,0.9)';
+    ctx.arc(W*0.78, groundY*0.42, groundY*0.16, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  function drawDunes(){
+    // far dunes
+    ctx.fillStyle = '#7a3f52';
+    ctx.beginPath();
+    ctx.moveTo(0, groundY);
+    const waveFar = ((parallaxFar % 400) + 400) % 400;
+    for (let x = -waveFar; x <= W + 400; x += 200){
+      ctx.quadraticCurveTo(x+100, groundY - 46, x+200, groundY);
+    }
+    ctx.lineTo(W, groundY);
+    ctx.closePath();
+    ctx.fill();
+
+    // near dunes
+    ctx.fillStyle = '#4a2338';
+    ctx.beginPath();
+    ctx.moveTo(0, groundY);
+    const waveNear = ((parallaxNear % 260) + 260) % 260;
+    for (let x = -waveNear; x <= W + 260; x += 130){
+      ctx.quadraticCurveTo(x+65, groundY - 24, x+130, groundY);
+    }
+    ctx.lineTo(W, groundY);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawRoad(){
+    ctx.fillStyle = '#241118';
+    ctx.fillRect(0, groundY, W, H - groundY);
+    ctx.strokeStyle = 'rgba(255,180,84,0.5)';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([22,18]);
+    const offset = -((distance*20) % 40);
+    ctx.beginPath();
+    ctx.moveTo(offset, groundY + (H-groundY)*0.5);
+    ctx.lineTo(W, groundY + (H-groundY)*0.5);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  function drawBike(){
+    const bx = W * 0.24;
+    const by = groundY + bike.y;
+    ctx.save();
+    ctx.translate(bx, by);
+
+    // shadow
+    const shadowScale = Math.max(0.35, 1 - Math.abs(bike.y)/90);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath();
+    ctx.ellipse(0, 2, 22*shadowScale, 5*shadowScale, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    // wheels
+    const wheelR = 9;
+    ctx.fillStyle = '#161016';
+    [[-16,0],[16,0]].forEach(([wx]) => {
+      ctx.save();
+      ctx.translate(wx, -wheelR);
+      ctx.rotate(bike.wheelSpin);
+      ctx.beginPath();
+      ctx.arc(0,0,wheelR,0,Math.PI*2);
+      ctx.fill();
+      ctx.strokeStyle = '#ffb454';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(-wheelR,0); ctx.lineTo(wheelR,0); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0,-wheelR); ctx.lineTo(0,wheelR); ctx.stroke();
+      ctx.restore();
+    });
+
+    // body silhouette
+    ctx.fillStyle = '#100a12';
+    ctx.beginPath();
+    ctx.moveTo(-18, -16);
+    ctx.lineTo(-6, -26);
+    ctx.lineTo(10, -26);
+    ctx.lineTo(20, -16);
+    ctx.lineTo(20, -10);
+    ctx.lineTo(-18, -10);
+    ctx.closePath();
+    ctx.fill();
+
+    // rider
+    ctx.fillStyle = '#1c1220';
+    ctx.beginPath();
+    ctx.ellipse(-2, -34, 6, 7, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillRect(-8, -30, 12, 16);
+
+    ctx.restore();
+  }
+
+  function drawObstacles(){
+    for (const o of obstacles){
+      if (o.type === 'rock'){
+        ctx.fillStyle = '#2c1a24';
+        ctx.beginPath();
+        ctx.moveTo(o.x, groundY);
+        ctx.lineTo(o.x + o.w*0.2, groundY - o.h);
+        ctx.lineTo(o.x + o.w*0.6, groundY - o.h*0.85);
+        ctx.lineTo(o.x + o.w, groundY);
+        ctx.closePath();
+        ctx.fill();
+      } else if (o.type === 'gap'){
+        ctx.clearRect(o.x, groundY, o.w, H - groundY);
+        ctx.fillStyle = '#120818';
+        ctx.fillRect(o.x, groundY, o.w, H - groundY);
+        ctx.fillStyle = 'rgba(255,180,84,0.35)';
+        ctx.fillRect(o.x - 2, groundY, 2, H - groundY);
+        ctx.fillRect(o.x + o.w, groundY, 2, H - groundY);
+      } else if (o.type === 'lowbar'){
+        const oy = groundY - o.gap - o.h;
+        ctx.fillStyle = '#3a2436';
+        ctx.fillRect(o.x, oy, o.w, o.h);
+        ctx.fillStyle = 'rgba(255,180,84,0.8)';
+        ctx.fillRect(o.x, oy + o.h - 4, o.w, 4);
+      }
+    }
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    ctx.save();
+    if (shake > 0.3){
+      ctx.translate((Math.random()-0.5)*shake, (Math.random()-0.5)*shake);
+    }
+    drawSky();
+    drawDunes();
+    drawRoad();
+    drawObstacles();
+    drawBike();
+    ctx.restore();
+  }
+
+  function loop(){
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  function startGame(){
+    resetGame();
+    overlay.style.display = 'none';
+    running = true;
+  }
+
+  startBtn.addEventListener('click', startGame);
+
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' || e.code === 'ArrowUp'){
+      e.preventDefault();
+      if (!running && overlay.style.display !== 'none'){
+        startGame();
+      } else {
+        jump();
+      }
+    }
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.code === 'Space' || e.code === 'ArrowUp') releaseJump();
+  });
+
+  holder.addEventListener('pointerdown', (e) => {
+    if (e.target === startBtn) return;
+    if (!running){
+      if (overlay.style.display !== 'none') startGame();
+      return;
+    }
+    jump();
+  });
+  holder.addEventListener('pointerup', releaseJump);
+  holder.addEventListener('pointerleave', releaseJump);
+
+  resize();
+  draw();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
